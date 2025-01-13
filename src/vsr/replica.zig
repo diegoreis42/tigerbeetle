@@ -3428,6 +3428,8 @@ pub fn ReplicaType(
             assert(self.grid_scrub_timeout.ticking);
             self.grid_scrub_timeout.reset();
 
+            self.trace.emit();
+
             if (!self.state_machine_opened) return;
             if (self.syncing != .idle) return;
             if (self.sync_tables != null) return;
