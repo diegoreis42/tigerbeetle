@@ -167,7 +167,7 @@ pub const Tracer = struct {
         assert(tracer.events_started[stack] == null);
         tracer.events_started[stack] = tracer.timer.read();
 
-        log.info(
+        log.debug(
             "{}: {s}({}): start: {}",
             .{ tracer.replica_index, @tagName(event), event_tracing, event_timing },
         );
@@ -221,7 +221,7 @@ pub const Tracer = struct {
         tracer.events_started[stack] = null;
 
         // Double leading space to align with 'start: '.
-        log.info("{}: {s}({}): stop:  {} (duration={}{s})", .{
+        log.debug("{}: {s}({}): stop:  {} (duration={}{s})", .{
             tracer.replica_index,
             @tagName(event),
             event_tracing,

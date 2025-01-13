@@ -61,6 +61,8 @@ pub const StatsD = struct {
         self.buffer_completions.deinit(allocator);
     }
 
+    // FIXME: flip this around; make an iterator over emit_timing and emit_metrics, and have emit
+    // call both of those.
     pub fn emit_timing_and_reset(self: *StatsD, events_aggregate: []?EventTimingAggregate) !void {
         // At some point, would it be more efficient to use a hashmap here...?
         var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
@@ -80,6 +82,7 @@ pub const StatsD = struct {
                     .event = event_timing.event,
                 };
 
+                // FIXME: Report as seconds and follow best practices from prom wiki.
                 inline for (.{ .min, .avg, .max, .sum, .count }) |aggregation| {
                     const value = switch (aggregation) {
                         .min => values.duration_min_us,
@@ -89,6 +92,8 @@ pub const StatsD = struct {
                         .count => values.count,
                         else => unreachable,
                     };
+
+                    // FIXME: emit count as count type
                     const single_metric = try std.fmt.bufPrint(
                         &single_buffer,
                         "tigerbeetle.{s}_us.{s}:{}|g|#{s}\n",
@@ -210,6 +215,10 @@ pub const StatsD = struct {
         const buffer_completion: *BufferCompletion = @fieldParentPtr("completion", completion);
         self.buffer_completions.push_assume_capacity(buffer_completion);
     }
+};
+
+const EventTimingStatsdIterator = struct {
+    events: []?EventMetricAggregate,
 };
 
 /// Format EventTiming and EventMetric's payload (ie, the tags) in a dogstatsd compatible way:

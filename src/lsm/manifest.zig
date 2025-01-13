@@ -454,7 +454,6 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
                     .{ .table_count_visible_max = .{ .tree = @enumFromInt(manifest.config.id), .level = level } },
                     table_count_visible_max,
                 );
-                // TODO(metric): This is a great metric to add.
             }
         }
 

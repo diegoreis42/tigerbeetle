@@ -3,9 +3,31 @@ const assert = std.debug.assert;
 
 const constants = @import("../constants.zig");
 
-// FIXME hack for now
 const CommitStage = @import("../vsr/replica.zig").CommitStage;
-const TreeEnum = @import("../state_machine.zig").TreeEnum;
+
+// FIXME: Doesn't this exist somewhere already?
+// FIXME: Naming doesn't align with what we use, eg accounts.id vs Account.id
+const TreeEnum = tree_enum: {
+    const tree_ids = @import("../state_machine.zig").tree_ids;
+    var tree_fields: []const std.builtin.Type.EnumField = &[_]std.builtin.Type.EnumField{};
+
+    for (std.meta.declarations(tree_ids)) |groove_field| {
+        const r = @field(tree_ids, groove_field.name);
+        for (std.meta.fieldNames(@TypeOf(r))) |field_name| {
+            tree_fields = tree_fields ++ &[_]std.builtin.Type.EnumField{.{
+                .name = groove_field.name ++ "." ++ field_name,
+                .value = @field(r, field_name),
+            }};
+        }
+    }
+
+    break :tree_enum @Type(.{ .Enum = .{
+        .tag_type = u64,
+        .fields = tree_fields,
+        .decls = &.{},
+        .is_exhaustive = true,
+    } });
+};
 
 pub const Event = union(enum) {
     replica_commit: struct { stage: CommitStage, op: ?usize = null },

@@ -72,11 +72,12 @@ pub const Metrics = struct {
             // Maybe assert and gate on constants.verify
             //maybe(self.events_timing[timing_stack].?.event_timing == event_timing);
 
+            // TODO: Test for saturation and no panics
             self.events_timing[timing_stack].?.values = .{
                 .duration_min_us = @min(timing_existing.duration_min_us, duration_us),
                 .duration_max_us = @max(timing_existing.duration_max_us, duration_us),
-                .duration_sum_us = timing_existing.duration_sum_us + duration_us,
-                .count = timing_existing.count + 1,
+                .duration_sum_us = timing_existing.duration_sum_us +| duration_us,
+                .count = timing_existing.count +| 1,
             };
         }
     }

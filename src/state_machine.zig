@@ -37,7 +37,7 @@ const CreateTransferResult = tb.CreateTransferResult;
 const AccountFilter = tb.AccountFilter;
 const QueryFilter = tb.QueryFilter;
 
-const tree_ids = struct {
+pub const tree_ids = struct {
     pub const accounts = .{
         .id = 1,
         .user_data_128 = 2,
@@ -75,29 +75,6 @@ const tree_ids = struct {
     pub const account_balances = .{
         .timestamp = 22,
     };
-};
-
-// FIXME: Doesn't this exist somewhere already?
-// FIXME: Naming doesn't align with what we use, eg accounts.id vs Account.id
-pub const TreeEnum = tree_enum: {
-    var tree_fields: []const std.builtin.Type.EnumField = &[_]std.builtin.Type.EnumField{};
-
-    for (std.meta.declarations(tree_ids)) |groove_field| {
-        const r = @field(tree_ids, groove_field.name);
-        for (std.meta.fieldNames(@TypeOf(r))) |field_name| {
-            tree_fields = tree_fields ++ &[_]std.builtin.Type.EnumField{.{
-                .name = groove_field.name ++ "." ++ field_name,
-                .value = @field(r, field_name),
-            }};
-        }
-    }
-
-    break :tree_enum @Type(.{ .Enum = .{
-        .tag_type = u64,
-        .fields = tree_fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
 };
 
 pub fn StateMachineType(
