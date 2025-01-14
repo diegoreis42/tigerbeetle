@@ -63,7 +63,7 @@ pub const StatsD = struct {
 
     // FIXME: flip this around; make an iterator over emit_timing and emit_metrics, and have emit
     // call both of those.
-    pub fn emit_timing_and_reset(self: *StatsD, events_aggregate: []?EventTimingAggregate) !void {
+    pub fn emit_and_reset(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
         // At some point, would it be more efficient to use a hashmap here...?
         var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
         var index: usize = 0;
@@ -72,101 +72,27 @@ pub const StatsD = struct {
         var single_buffer: [max_packet_size]u8 = undefined;
         std.debug.assert(single_buffer.len <= self.buffer_completions_buffer[0].buffer.len);
 
-        for (events_aggregate, 0..) |maybe_event_aggregate, i| {
-            if (maybe_event_aggregate) |event_timing| {
-                const values = event_timing.values;
-                const field_name = switch (event_timing.event) {
-                    inline else => |_, tag| @tagName(tag),
-                };
-                const event_timing_tag_formatter = EventStatsdTagFormatter(EventTiming){
-                    .event = event_timing.event,
-                };
+        var iterator_metrics = IteratorMetric{
+            .events = events_metric,
+            .buffer = &single_buffer,
+        };
 
-                // FIXME: Report as seconds and follow best practices from prom wiki.
-                inline for (.{ .min, .avg, .max, .sum, .count }) |aggregation| {
-                    const value = switch (aggregation) {
-                        .min => values.duration_min_us,
-                        .avg => @divFloor(values.duration_sum_us, values.count),
-                        .max => values.duration_max_us,
-                        .sum => values.duration_sum_us,
-                        .count => values.count,
-                        else => unreachable,
-                    };
+        var iterator_timings = IteratorTiming{
+            .events = events_timing,
+            .buffer = &single_buffer,
+        };
 
-                    // FIXME: emit count as count type
-                    const single_metric = try std.fmt.bufPrint(
-                        &single_buffer,
-                        "tigerbeetle.{s}_us.{s}:{}|g|#{s}\n",
-                        .{ field_name, @tagName(aggregation), value, event_timing_tag_formatter },
-                    );
+        for (.{ iterator_metrics.next, iterator_timings.next }) |next| {
+            // FIXME: Safety counter
+            while (true) {
+                const line = next();
+                if (line == .none) continue;
+                if (line == .exhausted) break;
 
-                    // Might need a new buffer, if this one is full.
-                    if (single_metric.len > buffer_completion.buffer[index..].len) {
-                        self.io.send(
-                            *StatsD,
-                            self,
-                            StatsD.send_callback,
-                            &buffer_completion.completion,
-                            self.socket,
-                            buffer_completion.buffer[0..index],
-                        );
-
-                        buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
-
-                        index = 0;
-                        std.debug.assert(buffer_completion.buffer[index..].len > single_metric.len);
-                    }
-
-                    stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], single_metric);
-                    index += single_metric.len;
-                }
-
-                events_aggregate[i] = null;
-            }
-        }
-
-        // Send the final packet, if needed.
-        if (index > 0) {
-            self.io.send(
-                *StatsD,
-                self,
-                StatsD.send_callback,
-                &buffer_completion.completion,
-                self.socket,
-                buffer_completion.buffer[0..index],
-            );
-        } else {
-            self.buffer_completions.push_assume_capacity(buffer_completion);
-        }
-    }
-
-    pub fn emit_metric_and_reset(self: *StatsD, events_metric: []?EventMetricAggregate) !void {
-        // At some point, would it be more efficient to use a hashmap here...?
-        var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
-        var index: usize = 0;
-
-        // FIXME: Comptime lenght limits, must be under a packet...
-        var single_buffer: [max_packet_size]u8 = undefined;
-        std.debug.assert(single_buffer.len <= self.buffer_completions_buffer[0].buffer.len);
-
-        for (events_metric, 0..) |maybe_event_aggregate, i| {
-            if (maybe_event_aggregate) |event_metric| {
-                const value = event_metric.value;
-                const field_name = switch (event_metric.event) {
-                    inline else => |_, tag| @tagName(tag),
-                };
-                const event_metric_tag_formatter = EventStatsdTagFormatter(EventMetric){
-                    .event = event_metric.event,
-                };
-
-                const single_metric = try std.fmt.bufPrint(
-                    &single_buffer,
-                    "tigerbeetle.{s}:{}|g|#{s}\n",
-                    .{ field_name, value, event_metric_tag_formatter },
-                );
+                const statsd_line = line.some;
 
                 // Might need a new buffer, if this one is full.
-                if (single_metric.len > buffer_completion.buffer[index..].len) {
+                if (statsd_line.len > buffer_completion.buffer[index..].len) {
                     self.io.send(
                         *StatsD,
                         self,
@@ -179,17 +105,15 @@ pub const StatsD = struct {
                     buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
 
                     index = 0;
-                    std.debug.assert(buffer_completion.buffer[index..].len > single_metric.len);
+                    std.debug.assert(buffer_completion.buffer[index..].len > statsd_line.len);
                 }
 
-                stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], single_metric);
-                index += single_metric.len;
-
-                events_metric[i] = null;
+                stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], statsd_line);
+                index += statsd_line.len;
             }
         }
 
-        // Send the final packet, if needed.
+        // Send the final packet, if needed, or return the BufferCompletion to the queue.
         if (index > 0) {
             self.io.send(
                 *StatsD,
@@ -217,8 +141,78 @@ pub const StatsD = struct {
     }
 };
 
-const EventTimingStatsdIterator = struct {
-    events: []?EventMetricAggregate,
+const IteratorOutput = union(enum) { none, some: []const u8, exhausted };
+
+const IteratorMetric = struct {
+    const TagFormatter = EventStatsdTagFormatter(EventMetric);
+
+    buffer: []const u8,
+    events_metric: []?EventMetricAggregate,
+
+    index: usize = 0,
+
+    pub fn next(self: *@This()) IteratorOutput {
+        defer self.index += 1;
+        if (self.index > self.events_metric.len) return .exhausted;
+        const event_metric = self.events_metric[self.index] orelse return .none;
+
+        const value = event_metric.value;
+        const field_name = switch (event_metric.event) {
+            inline else => |_, tag| @tagName(tag),
+        };
+        const event_metric_tag_formatter = TagFormatter{
+            .event = event_metric.event,
+        };
+
+        return try std.fmt.bufPrint(
+            self.buffer,
+            "tigerbeetle.{s}:{}|g|#{s}\n",
+            .{ field_name, value, event_metric_tag_formatter },
+        );
+    }
+};
+
+const IteratorTiming = struct {
+    const Aggregation = enum { min, avg, max, sum, count };
+    const TagFormatter = EventStatsdTagFormatter(EventTiming);
+
+    buffer: []const u8,
+    events_timing: []?EventTimingAggregate,
+
+    index: usize = 0,
+    index_aggregiation: Aggregation = .min,
+
+    pub fn next(self: *@This()) IteratorOutput {
+        defer self.index += 1;
+        if (self.index > self.events_metric.len) return .exhausted;
+        const event_timing = self.events_timing[self.index] orelse return .none;
+
+        const values = event_timing.values;
+        const field_name = switch (event_timing.event) {
+            inline else => |_, tag| @tagName(tag),
+        };
+        const tag_formatter = TagFormatter{
+            .event = event_timing.event,
+        };
+
+        // FIXME: Report as seconds and follow best practices from prom wiki.
+        const value = switch (self.index_aggregiation) {
+            .min => values.duration_min_us,
+            .avg => @divFloor(values.duration_sum_us, values.count),
+            .max => values.duration_max_us,
+            .sum => values.duration_sum_us,
+            .count => values.count,
+            else => unreachable,
+        };
+
+        // Emit count and sum as counter metrics, and the rest as gagues. This ensure that ... FIXME
+        const statsd_type = if (self.index_aggregiation == .count or self.index_aggregiation == .sum) "c" else "g";
+        return try std.fmt.bufPrint(
+            self.buffer,
+            "tigerbeetle.{s}_seconds.{s}:{}|{s}|#{s}\n",
+            .{ field_name, @tagName(self.index_aggregiation), value, statsd_type, tag_formatter },
+        );
+    }
 };
 
 /// Format EventTiming and EventMetric's payload (ie, the tags) in a dogstatsd compatible way:
