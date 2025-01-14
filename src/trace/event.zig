@@ -71,72 +71,23 @@ pub const Event = union(enum) {
         }
     }
 
-    pub fn event_tracing(event: *const Event) EventTracing {
+    /// Convert the base event to an EventTiming or EventMetric.
+    pub fn as(event: *const Event, EventType: type) EventType {
         return switch (event.*) {
-            .replica_sync_table => |event_unwrapped| .{ .replica_sync_table = .{
-                .index = event_unwrapped.index,
-            } },
-            .lookup_worker => |event_unwrapped| .{
-                .lookup_worker = .{ .index = event_unwrapped.index },
-            },
-            .scan_tree => |event_unwrapped| .{
-                .scan_tree = .{ .index = event_unwrapped.index },
-            },
-            .scan_tree_level => |event_unwrapped| .{
-                .scan_tree_level = .{
-                    .index = event_unwrapped.index,
-                    .level = event_unwrapped.level,
-                },
-            },
-            .grid_read => |event_unwrapped| .{
-                .grid_read = .{ .iop = event_unwrapped.iop },
-            },
-            .grid_write => |event_unwrapped| .{
-                .grid_write = .{ .iop = event_unwrapped.iop },
-            },
-            inline else => |_, tag| tag,
-        };
-    }
+            inline else => |source_payload, tag| {
+                const TargetPayload = std.meta.fieldInfo(EventType, tag).type;
+                const target_payload_info = @typeInfo(TargetPayload);
+                assert(target_payload_info == .Void or target_payload_info == .Struct);
 
-    pub fn event_timing(event: *const Event) EventTiming {
-        return switch (event.*) {
-            .replica_commit => |event_unwrapped| .{
-                .replica_commit = .{ .stage = event_unwrapped.stage },
+                var target_payload: TargetPayload = undefined;
+                if (target_payload_info == .Struct) {
+                    inline for (comptime std.meta.fieldNames(TargetPayload)) |field| {
+                        @field(target_payload, field) = @field(source_payload, field);
+                    }
+                }
+
+                return @unionInit(EventType, @tagName(tag), target_payload);
             },
-            .compact_beat => |event_unwrapped| .{
-                .compact_beat = .{
-                    .tree = event_unwrapped.tree,
-                    .level_b = event_unwrapped.level_b,
-                },
-            },
-            .compact_beat_merge => |event_unwrapped| .{
-                .compact_beat_merge = .{
-                    .tree = event_unwrapped.tree,
-                    .level_b = event_unwrapped.level_b,
-                },
-            },
-            .compact_mutable => |event_unwrapped| .{
-                .compact_mutable = .{ .tree = event_unwrapped.tree },
-            },
-            .compact_mutable_suffix => |event_unwrapped| .{
-                .compact_mutable_suffix = .{ .tree = event_unwrapped.tree },
-            },
-            .lookup => |event_unwrapped| .{
-                .lookup = .{ .tree = event_unwrapped.tree },
-            },
-            .lookup_worker => |event_unwrapped| .{
-                .lookup_worker = .{ .tree = event_unwrapped.tree },
-            },
-            .scan_tree => |event_unwrapped| .{
-                .scan_tree = .{ .tree = event_unwrapped.tree },
-            },
-            .scan_tree_level => |event_unwrapped| .{
-                .scan_tree_level = .{
-                    .tree = event_unwrapped.tree,
-                    .level = event_unwrapped.level,
-                },
-            },
-            inline else => |_, tag| tag,
         };
     }
 };

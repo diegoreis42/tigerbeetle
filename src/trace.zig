@@ -160,8 +160,8 @@ pub const Tracer = struct {
     }
 
     pub fn start(tracer: *Tracer, event: Event) void {
-        const event_tracing = event.event_tracing();
-        const event_timing = event.event_timing();
+        const event_tracing = event.as(EventTracing);
+        const event_timing = event.as(EventTiming);
         const stack = event_tracing.stack();
 
         assert(tracer.events_started[stack] == null);
@@ -208,8 +208,8 @@ pub const Tracer = struct {
     pub fn stop(tracer: *Tracer, event: Event) void {
         const us_log_threshold_ns = 5 * std.time.ns_per_ms;
 
-        const event_tracing = event.event_tracing();
-        const event_timing = event.event_timing();
+        const event_tracing = event.as(EventTracing);
+        const event_timing = event.as(EventTiming);
         const stack = event_tracing.stack();
 
         const event_start_ns = tracer.events_started[stack].?;

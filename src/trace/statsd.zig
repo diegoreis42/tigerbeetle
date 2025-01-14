@@ -63,61 +63,63 @@ pub const StatsD = struct {
     pub fn emit(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
         // At some point, would it be more efficient to use a hashmap here...?
         var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
-        var index: usize = 0;
+        var buffer_written: usize = 0;
 
         // FIXME: Comptime lenght limits, must be under a packet...
-        var single_buffer: [max_packet_size]u8 = undefined;
-        std.debug.assert(single_buffer.len <= self.buffer_completions_buffer[0].buffer.len);
+        // It's less error prone to write into a standalone buffer and copy it into the packet, then
+        // to deal with having partially written into a packet and needing to erase that and rewind
+        // the iterator to try again.
+        var buffer_single: [max_packet_size]u8 = undefined;
+        std.debug.assert(buffer_single.len <= self.buffer_completions_buffer[0].buffer.len);
 
         var iterator = Iterator{
-            .metrics = .{ .buffer = &single_buffer, .events_metric = events_metric },
-            .timings = .{ .buffer = &single_buffer, .events_timing = events_timing },
+            .metrics = .{ .buffer = &buffer_single, .events_metric = events_metric },
+            .timings = .{ .buffer = &buffer_single, .events_timing = events_timing },
         };
 
-        // FIXME: Safety counter
-        while (true) {
-            const line = iterator.next();
+        while (iterator.next()) |line| {
             if (line == .none) continue;
-            if (line == .exhausted) break;
 
             const statsd_line = line.some;
 
             // Might need a new buffer, if this one is full.
-            if (statsd_line.len > buffer_completion.buffer[index..].len) {
+            if (statsd_line.len > buffer_completion.buffer[buffer_written..].len) {
                 self.io.send(
                     *StatsD,
                     self,
                     StatsD.send_callback,
                     &buffer_completion.completion,
                     self.socket,
-                    buffer_completion.buffer[0..index],
+                    buffer_completion.buffer[0..buffer_written],
                 );
 
                 buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
 
-                index = 0;
-                std.debug.assert(buffer_completion.buffer[index..].len > statsd_line.len);
+                buffer_written = 0;
+                std.debug.assert(buffer_completion.buffer[buffer_written..].len > statsd_line.len);
             }
 
-            stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], statsd_line);
-            index += statsd_line.len;
+            stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[buffer_written..], statsd_line);
+            buffer_written += statsd_line.len;
         }
 
         // Send the final packet, if needed, or return the BufferCompletion to the queue.
-        if (index > 0) {
+        if (buffer_written > 0) {
             self.io.send(
                 *StatsD,
                 self,
                 StatsD.send_callback,
                 &buffer_completion.completion,
                 self.socket,
-                buffer_completion.buffer[0..index],
+                buffer_completion.buffer[0..buffer_written],
             );
         } else {
             self.buffer_completions.push_assume_capacity(buffer_completion);
         }
     }
 
+    /// The UDP packets containing the metrics are sent in a fire-and-forget manner. Generally,
+    /// FIXME: explain why this is ok and reduces complexity
     fn send_callback(
         self: *StatsD,
         completion: *IO.Completion,
@@ -132,7 +134,7 @@ pub const StatsD = struct {
 };
 
 const Iterator = struct {
-    const Output = union(enum) { none, some: []const u8, exhausted };
+    const Output = ?union(enum) { none, some: []const u8 };
 
     metrics: struct {
         const TagFormatter = EventStatsdTagFormatter(EventMetric);
@@ -144,7 +146,7 @@ const Iterator = struct {
 
         pub fn next(self: *@This()) Output {
             defer self.index += 1;
-            if (self.index == self.events_metric.len) return .exhausted;
+            if (self.index == self.events_metric.len) return null;
             const event_metric = self.events_metric[self.index] orelse return .none;
 
             const value = event_metric.value;
@@ -185,7 +187,7 @@ const Iterator = struct {
                     self.index_aggregation = .min;
                 }
             }
-            if (self.index == self.events_timing.len) return .exhausted;
+            if (self.index == self.events_timing.len) return null;
             const event_timing = self.events_timing[self.index] orelse return .none;
 
             const values = event_timing.values;
@@ -227,13 +229,13 @@ const Iterator = struct {
     pub fn next(self: *Iterator) Output {
         if (!self.metrics_exhausted) {
             const value = self.metrics.next();
-            if (value == .exhausted) self.metrics_exhausted = true else return value;
+            if (value == null) self.metrics_exhausted = true else return value;
         }
         if (!self.timings_exhausted) {
             const value = self.timings.next();
-            if (value == .exhausted) self.timings_exhausted = true else return value;
+            if (value == null) self.timings_exhausted = true else return value;
         }
-        return .exhausted;
+        return null;
     }
 };
 
