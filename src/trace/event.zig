@@ -31,6 +31,39 @@ const TreeEnum = tree_enum: {
     } });
 };
 
+fn enum_max(EnumOrUnion: type) u8 {
+    const type_info = @typeInfo(EnumOrUnion);
+    assert(type_info == .Enum or type_info == .Union);
+
+    const Enum_ = if (type_info == .Enum)
+        type_info.Enum
+    else
+        @typeInfo(type_info.Union.tag_type.?).Enum;
+    assert(Enum_.is_exhaustive);
+
+    var max: u8 = Enum_.fields[0].value;
+
+    for (Enum_.fields[1..]) |field| {
+        max = @max(max, field.value);
+    }
+
+    return max;
+}
+
+/// Base {Timing,Tracing} Event. This is further split up into two different Events that share the
+/// same tag: ones for timing and ones for tracing.
+///
+/// This is because there's a difference between tracing and aggregate timing. When doing tracing,
+/// the code needs to worry about the static allocation required for _concurrent_ traces. That is,
+/// there might be multiple `scan_tree`s, with different `index`es happening at once.
+///
+/// When timing, this is flipped on its head: the timing code doesn't need space for concurrency
+/// because it is called once, when an event has finished, and internally aggregates. The
+/// aggregiation is needed because there can be an unknown number of calls between flush intervals,
+/// compared to tracing which is emitted as it happens.
+///
+/// Rather, it needs space for the cardinality of the tags you'd like to emit. In the case of
+/// `scan_tree`s, this would be the tree it's scanning over, instead of the index of the scan.
 pub const Event = union(enum) {
     replica_commit: struct { stage: CommitStage, op: ?usize = null },
     replica_aof_write: struct { op: usize },
@@ -92,19 +125,133 @@ pub const Event = union(enum) {
     }
 };
 
-/// There's a difference between tracing and aggregate timing. When doing tracing, the code needs
-/// to worry about the static allocation required for _concurrent_ traces. That is, there might be
-/// multiple `scan_tree`s, with different `index`es happening at once.
-///
-/// When timing, this is flipped on its head: the timing code doesn't need space for concurrency
-/// because it is called once, when an event has finished, and internally aggregates. The
-/// aggregiation is needed because there can be an unknown number of calls between flush intervals,
-/// compared to tracing which is emitted as it happens.
-///
-/// Rather, it needs space for the cardinality of the tags you'd like to emit. In the case of
-/// `scan_tree`s, this would be the tree it's scanning over, rather than the index of the scan. Eg:
-///
-/// timing.scan_tree.transfers_id_avg=1234us vs timing.scan_tree.index_0_avg=1234us
+pub const EventTiming = union(Event.EventTag) {
+    replica_commit: struct { stage: CommitStage },
+    replica_aof_write,
+    replica_sync_table,
+
+    compact_beat: struct { tree: TreeEnum, level_b: u8 },
+    compact_beat_merge: struct { tree: TreeEnum, level_b: u8 },
+    compact_manifest,
+    compact_mutable: struct { tree: TreeEnum },
+    compact_mutable_suffix: struct { tree: TreeEnum },
+
+    lookup: struct { tree: TreeEnum },
+    lookup_worker: struct { tree: TreeEnum },
+
+    scan_tree: struct { tree: TreeEnum },
+    scan_tree_level: struct { tree: TreeEnum, level: u8 },
+
+    grid_read,
+    grid_write,
+
+    metrics_emit,
+
+    // FIXME: Exhaustively test these with a test. Easy enough!
+    pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
+        .replica_commit = enum_max(CommitStage),
+        .replica_aof_write = 1,
+        .replica_sync_table = 1,
+        .compact_beat = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .compact_beat_merge = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .compact_manifest = 1,
+        .compact_mutable = enum_max(TreeEnum),
+        .compact_mutable_suffix = enum_max(TreeEnum),
+        .lookup = enum_max(TreeEnum),
+        .lookup_worker = enum_max(TreeEnum),
+        .scan_tree = enum_max(TreeEnum),
+        .scan_tree_level = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .grid_read = 1,
+        .grid_write = 1,
+        .metrics_emit = 1,
+    });
+
+    pub const stack_bases = array: {
+        var array = std.enums.EnumArray(Event.EventTag, u32).initDefault(0, .{});
+        var next: u32 = 0;
+        for (std.enums.values(Event.EventTag)) |event_type| {
+            array.set(event_type, next);
+            next += stack_limits.get(event_type);
+        }
+        break :array array;
+    };
+
+    pub const stack_count = count: {
+        var count: u32 = 0;
+        for (std.enums.values(Event.EventTag)) |event_type| {
+            count += stack_limits.get(event_type);
+        }
+        break :count count;
+    };
+
+    // Unlike with EventTracing, which neatly organizes related events underneath one another, the
+    // order here does not matter.
+    //
+    // TODO: This could be computed automatically, at least in the cases where all, or all except
+    // one of the values are enums.
+    //
+    // TODO: The enum logic is a bit wasteful. It considers the max value, so for enums that don't
+    // start at 0 (eg, the trees) it's not optimal.
+    pub fn stack(event: *const EventTiming) u32 {
+        switch (event.*) {
+            // Single payload: CommitStage
+            inline .replica_commit => |data| {
+                const stage = @intFromEnum(data.stage);
+                assert(stage < stack_limits.get(event.*));
+
+                return stack_bases.get(event.*) + @as(u32, @intCast(stage));
+            },
+            // Single payload: TreeEnum
+            inline .compact_mutable, .compact_mutable_suffix, .lookup, .lookup_worker, .scan_tree => |data| {
+                const tree_id = @intFromEnum(data.tree);
+                assert(tree_id < stack_limits.get(event.*));
+
+                return stack_bases.get(event.*) + @as(u32, @intCast(tree_id));
+            },
+            // Double payload: TreeEnum + level_b
+            inline .compact_beat, .compact_beat_merge => |data| {
+                const tree_id = @intFromEnum(data.tree);
+                const level_b = data.level_b;
+                const offset = tree_id * constants.lsm_levels + level_b;
+                assert(offset < stack_limits.get(event.*));
+
+                return stack_bases.get(event.*) + @as(u32, @intCast(offset));
+            },
+            // Double payload: TreeEnum + level
+            inline .scan_tree_level => |data| {
+                const tree_id = @intFromEnum(data.tree);
+                const level = data.level;
+                const offset = tree_id * constants.lsm_levels + level;
+                assert(offset < stack_limits.get(event.*));
+
+                return stack_bases.get(event.*) + @as(u32, @intCast(offset));
+            },
+            inline else => |data, event_tag| {
+                comptime assert(@TypeOf(data) == void);
+                comptime assert(stack_limits.get(event_tag) == 1);
+
+                return comptime stack_bases.get(event_tag);
+            },
+        }
+    }
+
+    pub fn format(
+        event: *const EventTiming,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        switch (event.*) {
+            inline else => |data| {
+                try writer.print("{}", .{event_equals_format(data)});
+            },
+        }
+    }
+};
+
 pub const EventTracing = union(Event.EventTag) {
     replica_commit,
     replica_aof_write,
@@ -125,7 +272,7 @@ pub const EventTracing = union(Event.EventTag) {
     grid_read: struct { iop: usize },
     grid_write: struct { iop: usize },
 
-    metrics_emit: void,
+    metrics_emit,
 
     pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
         .replica_commit = 1,
@@ -221,130 +368,7 @@ pub const EventTracing = union(Event.EventTag) {
     }
 };
 
-pub const EventTiming = union(Event.EventTag) {
-    replica_commit: struct { stage: CommitStage },
-    replica_aof_write,
-    replica_sync_table,
-
-    compact_beat: struct { tree: TreeEnum, level_b: u8 },
-    compact_beat_merge: struct { tree: TreeEnum, level_b: u8 },
-    compact_manifest,
-    compact_mutable: struct { tree: TreeEnum },
-    compact_mutable_suffix: struct { tree: TreeEnum },
-
-    lookup: struct { tree: TreeEnum },
-    lookup_worker: struct { tree: TreeEnum },
-
-    scan_tree: struct { tree: TreeEnum },
-    scan_tree_level: struct { tree: TreeEnum, level: u8 },
-
-    grid_read,
-    grid_write,
-
-    metrics_emit: void,
-
-    // FIXME: Exhaustively test these with a test. Easy enough!
-    pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
-        .replica_commit = std.meta.fields(CommitStage).len,
-        .replica_aof_write = 1,
-        .replica_sync_table = 1,
-        .compact_beat = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
-        .compact_beat_merge = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
-        .compact_manifest = 1,
-        .compact_mutable = (std.meta.fields(TreeEnum).len + 1),
-        .compact_mutable_suffix = (std.meta.fields(TreeEnum).len + 1),
-        .lookup = (std.meta.fields(TreeEnum).len + 1),
-        .lookup_worker = (std.meta.fields(TreeEnum).len + 1),
-        .scan_tree = (std.meta.fields(TreeEnum).len + 1),
-        .scan_tree_level = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
-        .grid_read = 1,
-        .grid_write = 1,
-        .metrics_emit = 1,
-    });
-
-    pub const stack_bases = array: {
-        var array = std.enums.EnumArray(Event.EventTag, u32).initDefault(0, .{});
-        var next: u32 = 0;
-        for (std.enums.values(Event.EventTag)) |event_type| {
-            array.set(event_type, next);
-            next += stack_limits.get(event_type);
-        }
-        break :array array;
-    };
-
-    pub const stack_count = count: {
-        var count: u32 = 0;
-        for (std.enums.values(Event.EventTag)) |event_type| {
-            count += stack_limits.get(event_type);
-        }
-        break :count count;
-    };
-
-    // Unlike with EventTracing, which neatly organizes related events underneath one another, the
-    // order here does not matter.
-    pub fn stack(event: *const EventTiming) u32 {
-        switch (event.*) {
-            // Single payload: CommitStage
-            inline .replica_commit => |data| {
-                // FIXME:Can we assert this at comptime?
-                // FIXME: The enum logic is actually broken. We kinda want to remap the enum from 0 -> limit.... At the moment
-                // hack around it with +1 for trees etc.
-                const stage = @intFromEnum(data.stage);
-                assert(stage < stack_limits.get(event.*));
-
-                return stack_bases.get(event.*) + @as(u32, @intCast(stage));
-            },
-            // Single payload: TreeEnum
-            inline .compact_mutable, .compact_mutable_suffix, .lookup, .lookup_worker, .scan_tree => |data| {
-                const tree_id = @intFromEnum(data.tree);
-                assert(tree_id < stack_limits.get(event.*));
-
-                return stack_bases.get(event.*) + @as(u32, @intCast(tree_id));
-            },
-            // Double payload: TreeEnum + level_b
-            inline .compact_beat, .compact_beat_merge => |data| {
-                const tree_id = @intFromEnum(data.tree);
-                const level_b = data.level_b;
-                const offset = tree_id * constants.lsm_levels + level_b;
-                assert(offset < stack_limits.get(event.*));
-
-                return stack_bases.get(event.*) + @as(u32, @intCast(offset));
-            },
-            // Double payload: TreeEnum + level
-            inline .scan_tree_level => |data| {
-                const tree_id = @intFromEnum(data.tree);
-                const level = data.level;
-                const offset = tree_id * constants.lsm_levels + level;
-                assert(offset < stack_limits.get(event.*));
-
-                return stack_bases.get(event.*) + @as(u32, @intCast(offset));
-            },
-            inline else => |data, event_tag| {
-                comptime assert(@TypeOf(data) == void);
-                comptime assert(stack_limits.get(event_tag) == 1);
-
-                return comptime stack_bases.get(event_tag);
-            },
-        }
-    }
-
-    pub fn format(
-        event: *const EventTiming,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        switch (event.*) {
-            inline else => |data| {
-                try writer.print("{}", .{event_equals_format(data)});
-            },
-        }
-    }
-};
-
+/// Metric
 pub const EventMetric = union(enum) {
     const EventTag = std.meta.Tag(EventMetric);
 
@@ -353,8 +377,8 @@ pub const EventMetric = union(enum) {
 
     // FIXME: Exhaustively test these with a test. Easy enough!
     pub const stack_limits = std.enums.EnumArray(EventTag, u32).init(.{
-        .table_count_visible = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
-        .table_count_visible_max = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
+        .table_count_visible = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .table_count_visible_max = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
     });
 
     pub const stack_bases = array: {
@@ -472,3 +496,5 @@ pub const EventMetricAggregate = struct {
     event: EventMetric,
     value: u64,
 };
+
+// test "event"

@@ -138,7 +138,7 @@ pub const Tracer = struct {
         const buffer = try allocator.alloc(u8, trace_span_size_max);
         errdefer allocator.free(buffer);
 
-        const metrics = try Metrics.init(allocator, options.io.?);
+        const metrics = try Metrics.init(allocator, options.io);
         errdefer metrics.deinit(allocator);
 
         return .{
