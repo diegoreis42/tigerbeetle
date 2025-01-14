@@ -3,15 +3,15 @@ const stdx = @import("../stdx.zig");
 
 const IO = @import("../io.zig").IO;
 const FIFOType = @import("../fifo.zig").FIFOType;
+const RingBufferType = @import("../ring_buffer.zig").RingBufferType;
+
+const EventMetric = @import("event.zig").EventMetric;
+const EventMetricAggregate = @import("event.zig").EventMetricAggregate;
+const EventTiming = @import("event.zig").EventTiming;
+const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
 
 const max_packet_size = 1400;
 const max_packet_count = 256;
-
-const RingBufferType = @import("../ring_buffer.zig").RingBufferType;
-const EventTiming = @import("event.zig").EventTiming;
-const EventMetric = @import("event.zig").EventMetric;
-const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
-const EventMetricAggregate = @import("event.zig").EventMetricAggregate;
 
 const BufferCompletion = struct {
     buffer: [max_packet_size]u8,
@@ -43,7 +43,6 @@ pub const StatsD = struct {
         }
 
         // 'Connect' the UDP socket, so we can just send() to it normally.
-        // FIXME: In io.zig, connrefused etc should be handled better!
         try std.posix.connect(socket, &address.any, address.getOsSockLen());
 
         return .{
@@ -61,9 +60,7 @@ pub const StatsD = struct {
         self.buffer_completions.deinit(allocator);
     }
 
-    // FIXME: flip this around; make an iterator over emit_timing and emit_metrics, and have emit
-    // call both of those.
-    pub fn emit_and_reset(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
+    pub fn emit(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
         // At some point, would it be more efficient to use a hashmap here...?
         var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
         var index: usize = 0;
@@ -72,45 +69,38 @@ pub const StatsD = struct {
         var single_buffer: [max_packet_size]u8 = undefined;
         std.debug.assert(single_buffer.len <= self.buffer_completions_buffer[0].buffer.len);
 
-        var iterator_metrics = IteratorMetric{
-            .events = events_metric,
-            .buffer = &single_buffer,
+        var iterator = Iterator{
+            .metrics = .{ .buffer = &single_buffer, .events_metric = events_metric },
+            .timings = .{ .buffer = &single_buffer, .events_timing = events_timing },
         };
 
-        var iterator_timings = IteratorTiming{
-            .events = events_timing,
-            .buffer = &single_buffer,
-        };
+        // FIXME: Safety counter
+        while (true) {
+            const line = iterator.next();
+            if (line == .none) continue;
+            if (line == .exhausted) break;
 
-        for (.{ iterator_metrics.next, iterator_timings.next }) |next| {
-            // FIXME: Safety counter
-            while (true) {
-                const line = next();
-                if (line == .none) continue;
-                if (line == .exhausted) break;
+            const statsd_line = line.some;
 
-                const statsd_line = line.some;
+            // Might need a new buffer, if this one is full.
+            if (statsd_line.len > buffer_completion.buffer[index..].len) {
+                self.io.send(
+                    *StatsD,
+                    self,
+                    StatsD.send_callback,
+                    &buffer_completion.completion,
+                    self.socket,
+                    buffer_completion.buffer[0..index],
+                );
 
-                // Might need a new buffer, if this one is full.
-                if (statsd_line.len > buffer_completion.buffer[index..].len) {
-                    self.io.send(
-                        *StatsD,
-                        self,
-                        StatsD.send_callback,
-                        &buffer_completion.completion,
-                        self.socket,
-                        buffer_completion.buffer[0..index],
-                    );
+                buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
 
-                    buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
-
-                    index = 0;
-                    std.debug.assert(buffer_completion.buffer[index..].len > statsd_line.len);
-                }
-
-                stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], statsd_line);
-                index += statsd_line.len;
+                index = 0;
+                std.debug.assert(buffer_completion.buffer[index..].len > statsd_line.len);
             }
+
+            stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[index..], statsd_line);
+            index += statsd_line.len;
         }
 
         // Send the final packet, if needed, or return the BufferCompletion to the queue.
@@ -141,77 +131,109 @@ pub const StatsD = struct {
     }
 };
 
-const IteratorOutput = union(enum) { none, some: []const u8, exhausted };
+const Iterator = struct {
+    const Output = union(enum) { none, some: []const u8, exhausted };
 
-const IteratorMetric = struct {
-    const TagFormatter = EventStatsdTagFormatter(EventMetric);
+    metrics: struct {
+        const TagFormatter = EventStatsdTagFormatter(EventMetric);
 
-    buffer: []const u8,
-    events_metric: []?EventMetricAggregate,
+        buffer: []u8,
+        events_metric: []?EventMetricAggregate,
 
-    index: usize = 0,
+        index: usize = 0,
 
-    pub fn next(self: *@This()) IteratorOutput {
-        defer self.index += 1;
-        if (self.index > self.events_metric.len) return .exhausted;
-        const event_metric = self.events_metric[self.index] orelse return .none;
+        pub fn next(self: *@This()) Output {
+            defer self.index += 1;
+            if (self.index == self.events_metric.len) return .exhausted;
+            const event_metric = self.events_metric[self.index] orelse return .none;
 
-        const value = event_metric.value;
-        const field_name = switch (event_metric.event) {
-            inline else => |_, tag| @tagName(tag),
-        };
-        const event_metric_tag_formatter = TagFormatter{
-            .event = event_metric.event,
-        };
+            const value = event_metric.value;
+            const field_name = switch (event_metric.event) {
+                inline else => |_, tag| @tagName(tag),
+            };
+            const event_metric_tag_formatter = TagFormatter{
+                .event = event_metric.event,
+            };
 
-        return try std.fmt.bufPrint(
-            self.buffer,
-            "tigerbeetle.{s}:{}|g|#{s}\n",
-            .{ field_name, value, event_metric_tag_formatter },
-        );
-    }
-};
+            return .{
+                .some = std.fmt.bufPrint(
+                    self.buffer,
+                    // FIXME: Support counters too
+                    "tigerbeetle.{s}:{}|g|#{s}\n",
+                    .{ field_name, value, event_metric_tag_formatter },
+                ) catch return .none, // FIXME: log err or ensure can never happen exhaustively
+            };
+        }
+    },
 
-const IteratorTiming = struct {
-    const Aggregation = enum { min, avg, max, sum, count };
-    const TagFormatter = EventStatsdTagFormatter(EventTiming);
+    timings: struct {
+        const Aggregation = enum { min, avg, max, sum, count, sentinel };
+        const TagFormatter = EventStatsdTagFormatter(EventTiming);
 
-    buffer: []const u8,
-    events_timing: []?EventTimingAggregate,
+        buffer: []u8,
+        events_timing: []?EventTimingAggregate,
 
-    index: usize = 0,
-    index_aggregiation: Aggregation = .min,
+        index: usize = 0,
+        index_aggregation: Aggregation = .min,
 
-    pub fn next(self: *@This()) IteratorOutput {
-        defer self.index += 1;
-        if (self.index > self.events_metric.len) return .exhausted;
-        const event_timing = self.events_timing[self.index] orelse return .none;
+        pub fn next(self: *@This()) Output {
+            defer {
+                // FIXME: Better way?
+                self.index_aggregation = @enumFromInt(@intFromEnum(self.index_aggregation) + 1);
+                if (self.index_aggregation == .sentinel) {
+                    self.index += 1;
+                    self.index_aggregation = .min;
+                }
+            }
+            if (self.index == self.events_timing.len) return .exhausted;
+            const event_timing = self.events_timing[self.index] orelse return .none;
 
-        const values = event_timing.values;
-        const field_name = switch (event_timing.event) {
-            inline else => |_, tag| @tagName(tag),
-        };
-        const tag_formatter = TagFormatter{
-            .event = event_timing.event,
-        };
+            const values = event_timing.values;
+            const field_name = switch (event_timing.event) {
+                inline else => |_, tag| @tagName(tag),
+            };
+            const tag_formatter = TagFormatter{
+                .event = event_timing.event,
+            };
 
-        // FIXME: Report as seconds and follow best practices from prom wiki.
-        const value = switch (self.index_aggregiation) {
-            .min => values.duration_min_us,
-            .avg => @divFloor(values.duration_sum_us, values.count),
-            .max => values.duration_max_us,
-            .sum => values.duration_sum_us,
-            .count => values.count,
-            else => unreachable,
-        };
+            // FIXME: Report as seconds and follow best practices from prom wiki.
+            const value = switch (self.index_aggregation) {
+                .min => @as(f64, @floatFromInt(values.duration_min_us)) / std.time.us_per_s,
+                // Might make more sense to do the div in floating point?
+                .avg => @as(f64, @floatFromInt(@divFloor(values.duration_sum_us, values.count))) /
+                    std.time.us_per_s,
+                .max => @as(f64, @floatFromInt(values.duration_max_us)) / std.time.us_per_s,
+                .sum => @as(f64, @floatFromInt(values.duration_sum_us)) / std.time.us_per_s,
+                .count => @as(f64, @floatFromInt(values.count)), // Collateral damage.
+                .sentinel => unreachable,
+            };
 
-        // Emit count and sum as counter metrics, and the rest as gagues. This ensure that ... FIXME
-        const statsd_type = if (self.index_aggregiation == .count or self.index_aggregiation == .sum) "c" else "g";
-        return try std.fmt.bufPrint(
-            self.buffer,
-            "tigerbeetle.{s}_seconds.{s}:{}|{s}|#{s}\n",
-            .{ field_name, @tagName(self.index_aggregiation), value, statsd_type, tag_formatter },
-        );
+            // Emit count and sum as counter metrics, and the rest as gagues. This ensure that ... FIXME
+            const statsd_type = if (self.index_aggregation == .count or self.index_aggregation == .sum) "c" else "g";
+            return .{
+                .some = std.fmt.bufPrint(
+                    self.buffer,
+                    // FIXME: Make format string more readable.
+                    "tigerbeetle.{s}_seconds.{s}:{d}|{s}|#{s}\n",
+                    .{ field_name, @tagName(self.index_aggregation), value, statsd_type, tag_formatter },
+                ) catch return .none, // FIXME: log err or ensure can never happen exhaustively
+            };
+        }
+    },
+
+    metrics_exhausted: bool = false,
+    timings_exhausted: bool = false,
+
+    pub fn next(self: *Iterator) Output {
+        if (!self.metrics_exhausted) {
+            const value = self.metrics.next();
+            if (value == .exhausted) self.metrics_exhausted = true else return value;
+        }
+        if (!self.timings_exhausted) {
+            const value = self.timings.next();
+            if (value == .exhausted) self.timings_exhausted = true else return value;
+        }
+        return .exhausted;
     }
 };
 

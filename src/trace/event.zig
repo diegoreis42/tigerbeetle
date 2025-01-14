@@ -7,6 +7,8 @@ const CommitStage = @import("../vsr/replica.zig").CommitStage;
 
 // FIXME: Doesn't this exist somewhere already?
 // FIXME: Naming doesn't align with what we use, eg accounts.id vs Account.id
+// FIXME: Exhaustive tests for Event
+// FIXME: Make EventTiming and EventMetric only use enums and get rid of cardinality stuff
 const TreeEnum = tree_enum: {
     const tree_ids = @import("../state_machine.zig").tree_ids;
     var tree_fields: []const std.builtin.Type.EnumField = &[_]std.builtin.Type.EnumField{};

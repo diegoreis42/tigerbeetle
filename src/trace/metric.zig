@@ -51,8 +51,12 @@ pub const Metrics = struct {
     }
 
     // Timing works by storing the min, max, sum and count of each value provided. The avg is
-    // calculated from sum and count at emit time. More advanced streaming quantile calculation is
-    // not done.
+    // calculated from sum and count at emit time.
+    //
+    // When these are emitted upstream (via statsd, currently), upstream must apply different
+    // aggregiations:
+    // * min/max/avg are considered gauges for aggregation: last value wins.
+    // * sum/count are considered counters for aggregation: they are added to the existing values.
     pub fn timing(self: *Metrics, event_timing: EventTiming, duration_us: u64) void {
         const timing_stack = event_timing.stack();
 
@@ -83,7 +87,15 @@ pub const Metrics = struct {
     }
 
     pub fn emit(self: *Metrics) !void {
-        try self.statsd.emit_timing_and_reset(self.events_timing);
-        try self.statsd.emit_metric_and_reset(self.events_metric);
+        try self.statsd.emit(self.events_metric, self.events_timing);
+
+        // For statsd, the right thing is to reset metrics between emitting. For something like
+        // Prometheus, this would have to be removed.
+        self.reset_all();
+    }
+
+    pub fn reset_all(self: *Metrics) void {
+        @memset(self.events_metric, null);
+        @memset(self.events_timing, null);
     }
 };
