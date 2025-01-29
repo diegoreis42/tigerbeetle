@@ -12,9 +12,11 @@ const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
 
 const log = std.log.scoped(.statsd);
 
-/// It's assumed you'll be running a statsd server on the same machine, in which case MTU is not
-/// important, or, you'll be running it over a local network. Choose 1400 as a conservative
-/// estimate for the largest UDP packet we'll emit in that case.
+/// A resonable value to keep the total length of the packet under a single MTU, for a local
+/// network.
+///
+/// https://github.com/statsd/statsd/blob/master/docs/metric_types.md#multi-metric-packets
+/// FIXME: Assert no metric is larger than this.
 const max_packet_size = 1400;
 
 /// This implementation emits on an open-loop: on the emit interval, it fires off up to
@@ -23,7 +25,17 @@ const max_packet_size = 1400;
 /// The emit interval needs to be large enough that the kernel will have finished processing them
 /// before emitting again. If not, a warning will be printed.
 // TODO: For now, this assumes 100 bytes max per event! This can actually be computed exactly....
-const max_packet_count = stdx.div_ceil(EventMetric.stack_count + EventTiming.stack_count, 14);
+/// The maximum number of packets that can be sent in one flush. The implementation does not do
+/// backpressure, so if all packets haven't finished sending between flush cycles (incredibly
+/// unlikely, if not impossible due to how sending UDP packets works in the kernel), then packets
+/// will be dropped.
+///
+/// However, this value needs to be high enough to account for the maximum number of metrics that
+/// will be sent _within_ a single flush, given how many metrics can fit into a single packet
+///
+/// TODO: This is an extreme upper bound, it can be reduced! It assumes a single packet can only
+/// take one metric / timing.
+const max_packet_count = EventMetric.stack_count + EventTiming.stack_count;
 
 const BufferCompletion = struct {
     buffer: [max_packet_size]u8,
