@@ -5,10 +5,10 @@ const constants = @import("../constants.zig");
 
 const CommitStage = @import("../vsr/replica.zig").CommitStage;
 
+// FIXME: Exhaustive tests for Event
+
 // FIXME: Doesn't this exist somewhere already?
 // FIXME: Naming doesn't align with what we use, eg accounts.id vs Account.id
-// FIXME: Exhaustive tests for Event
-// FIXME: Make EventTiming and EventMetric only use enums and get rid of cardinality stuff
 const TreeEnum = tree_enum: {
     const tree_ids = @import("../state_machine.zig").tree_ids;
     var tree_fields: []const std.builtin.Type.EnumField = &[_]std.builtin.Type.EnumField{};
@@ -47,9 +47,11 @@ fn enum_max(EnumOrUnion: type) u8 {
         max = @max(max, field.value);
     }
 
-    return max;
+    return max + 1;
 }
 
+// TODO: It should be possible to get rid of all unbounded cardinality (eg, level_b being a u8) and
+// replace them with enums instead. This would allow for calculating the stack limit automatically.
 /// Base {Timing,Tracing} Event. This is further split up into two different Events that share the
 /// same tag: ones for timing and ones for tracing.
 ///
@@ -147,20 +149,19 @@ pub const EventTiming = union(Event.EventTag) {
 
     metrics_emit,
 
-    // FIXME: Exhaustively test these with a test. Easy enough!
     pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
         .replica_commit = enum_max(CommitStage),
         .replica_aof_write = 1,
         .replica_sync_table = 1,
-        .compact_beat = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
-        .compact_beat_merge = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .compact_beat = enum_max(TreeEnum) * constants.lsm_levels,
+        .compact_beat_merge = enum_max(TreeEnum) * constants.lsm_levels,
         .compact_manifest = 1,
         .compact_mutable = enum_max(TreeEnum),
         .compact_mutable_suffix = enum_max(TreeEnum),
         .lookup = enum_max(TreeEnum),
         .lookup_worker = enum_max(TreeEnum),
         .scan_tree = enum_max(TreeEnum),
-        .scan_tree_level = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .scan_tree_level = enum_max(TreeEnum) * constants.lsm_levels,
         .grid_read = 1,
         .grid_write = 1,
         .metrics_emit = 1,
@@ -286,7 +287,7 @@ pub const EventTracing = union(Event.EventTag) {
         .lookup = 1,
         .lookup_worker = constants.grid_iops_read_max,
         .scan_tree = constants.lsm_scans_max,
-        .scan_tree_level = constants.lsm_scans_max * @as(u32, constants.lsm_levels),
+        .scan_tree_level = constants.lsm_scans_max * constants.lsm_levels,
         .grid_read = constants.grid_iops_read_max,
         .grid_write = constants.grid_iops_write_max,
         .metrics_emit = 1,
@@ -375,10 +376,9 @@ pub const EventMetric = union(enum) {
     table_count_visible: struct { tree: TreeEnum, level: u8 },
     table_count_visible_max: struct { tree: TreeEnum, level: u8 },
 
-    // FIXME: Exhaustively test these with a test. Easy enough!
     pub const stack_limits = std.enums.EnumArray(EventTag, u32).init(.{
-        .table_count_visible = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
-        .table_count_visible_max = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .table_count_visible = enum_max(TreeEnum) * constants.lsm_levels,
+        .table_count_visible_max = enum_max(TreeEnum) * constants.lsm_levels,
     });
 
     pub const stack_bases = array: {

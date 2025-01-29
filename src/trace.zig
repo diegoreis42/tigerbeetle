@@ -124,10 +124,7 @@ pub const Tracer = struct {
     pub const Options = struct {
         /// The tracer still validates start/stop state even when writer=null.
         writer: ?std.io.AnyWriter = null,
-
-        // For metrics: FIXME
-        io: ?*IO = null,
-        // FIXME: Add statsd address etc. Or move it up and make anytype? PRobs too much for now.
+        statsd_options: Metrics.StatsDOptions = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, replica_index: u8, options: Options) !Tracer {
@@ -138,7 +135,9 @@ pub const Tracer = struct {
         const buffer = try allocator.alloc(u8, trace_span_size_max);
         errdefer allocator.free(buffer);
 
-        const metrics = try Metrics.init(allocator, options.io);
+        const metrics = try Metrics.init(allocator, .{
+            .statsd = options.statsd_options,
+        });
         errdefer metrics.deinit(allocator);
 
         return .{

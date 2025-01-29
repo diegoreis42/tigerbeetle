@@ -819,11 +819,12 @@ pub fn array_print(
 ) []const u8 {
     const Args = @TypeOf(args);
     const ArgsStruct = @typeInfo(Args).Struct;
-    comptime assert(ArgsStruct.is_tuple);
+    // comptime assert(ArgsStruct.is_tuple);
 
     comptime {
         var args_worst_case: Args = undefined;
         for (ArgsStruct.fields, 0..) |field, index| {
+            @compileLog(field);
             const arg_worst_case = switch (field.type) {
                 u64 => std.math.maxInt(field.type),
                 else => @compileError("array_print: unhandled type"),

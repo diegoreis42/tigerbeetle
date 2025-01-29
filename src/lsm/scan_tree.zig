@@ -228,7 +228,10 @@ pub fn ScanTreeType(
             assert(self.state == .idle or self.state == .needs_data);
 
             self.tree.grid.trace.start(
-                .{ .scan_tree = .{ .index = self.buffer.index, .tree = @enumFromInt(self.tree.config.id) } },
+                .{ .scan_tree = .{
+                    .index = self.buffer.index,
+                    .tree = @enumFromInt(self.tree.config.id),
+                } },
             );
 
             const state_before = self.state;
@@ -401,7 +404,10 @@ pub fn ScanTreeType(
             }
 
             self.tree.grid.trace.stop(
-                .{ .scan_tree = .{ .index = self.buffer.index, .tree = @enumFromInt(self.tree.config.id) } },
+                .{ .scan_tree = .{
+                    .index = self.buffer.index,
+                    .tree = @enumFromInt(self.tree.config.id),
+                } },
             );
 
             callback(context, self);

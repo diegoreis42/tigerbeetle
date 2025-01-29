@@ -974,7 +974,10 @@ pub fn GrooveType(
                     };
 
                     context.groove.grid.trace.start(
-                        .{ .lookup_worker = .{ .index = worker.index, .tree = @enumFromInt(context.groove.objects.config.id) } },
+                        .{ .lookup_worker = .{
+                            .index = worker.index,
+                            .tree = @enumFromInt(context.groove.objects.config.id),
+                        } },
                     );
 
                     context.workers_pending += 1;

@@ -121,7 +121,10 @@ pub fn ScanLookupType(
                 self.workers_pending += 1;
 
                 self.groove.grid.trace.start(
-                    .{ .lookup_worker = .{ .index = worker.index, .tree = @enumFromInt(self.groove.objects.config.id) } },
+                    .{ .lookup_worker = .{
+                        .index = worker.index,
+                        .tree = @enumFromInt(self.groove.objects.config.id),
+                    } },
                 );
 
                 self.lookup_worker_next(worker);
@@ -244,7 +247,10 @@ pub fn ScanLookupType(
             assert(self.workers_pending > 0);
 
             self.groove.grid.trace.stop(
-                .{ .lookup_worker = .{ .index = worker.index, .tree = @enumFromInt(self.groove.objects.config.id) } },
+                .{ .lookup_worker = .{
+                    .index = worker.index,
+                    .tree = @enumFromInt(self.groove.objects.config.id),
+                } },
             );
 
             self.workers_pending -= 1;

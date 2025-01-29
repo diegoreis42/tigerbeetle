@@ -11,38 +11,44 @@ const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
 const EventMetricAggregate = @import("event.zig").EventMetricAggregate;
 
 pub const Metrics = struct {
-    events_timing: []?EventTimingAggregate,
+    pub const StatsDOptions = ?struct {
+        io: *IO,
+        address: std.net.Address,
+    };
+
     events_metric: []?EventMetricAggregate,
+    events_timing: []?EventTimingAggregate,
 
     statsd: ?StatsD,
 
-    pub fn init(allocator: std.mem.Allocator, io_maybe: ?*IO) !Metrics {
-        const events_timing = try allocator.alloc(?EventTimingAggregate, EventTiming.stack_count);
-        errdefer allocator.free(events_timing);
-
-        @memset(events_timing, null);
-
+    pub fn init(allocator: std.mem.Allocator, options: struct { statsd: StatsDOptions }) !Metrics {
         const events_metric = try allocator.alloc(?EventMetricAggregate, EventMetric.stack_count);
         errdefer allocator.free(events_metric);
 
         @memset(events_metric, null);
 
-        const statsd = if (io_maybe) |io|
-            try StatsD.init(allocator, io, try std.net.Address.resolveIp("127.0.0.1", 8125))
+        const events_timing = try allocator.alloc(?EventTimingAggregate, EventTiming.stack_count);
+        errdefer allocator.free(events_timing);
+
+        @memset(events_timing, null);
+
+        const statsd = if (options.statsd) |statsd_options|
+            try StatsD.init(allocator, statsd_options.io, statsd_options.address)
         else
             null;
         errdefer if (statsd) |*s| s.deinit(allocator);
 
         return .{
-            .events_timing = events_timing,
             .events_metric = events_metric,
+            .events_timing = events_timing,
             .statsd = statsd,
         };
     }
 
     pub fn deinit(self: *Metrics, allocator: std.mem.Allocator) void {
-        allocator.free(self.events_metric);
+        if (self.statsd) |*s| s.deinit(allocator);
         allocator.free(self.events_timing);
+        allocator.free(self.events_metric);
     }
 
     /// Gauges work on a last-set wins. Multiple calls to .gauge() followed by an emit will result
@@ -91,6 +97,7 @@ pub const Metrics = struct {
         }
     }
 
+    // TODO: Handle rarely changing metrics with statsd.
     pub fn emit(self: *Metrics) !void {
         if (self.statsd) |*s| {
             try s.emit(self.events_metric, self.events_timing);

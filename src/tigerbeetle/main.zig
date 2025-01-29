@@ -404,7 +404,10 @@ const Command = struct {
             .grid_cache_blocks_count = args.cache_grid_blocks,
             .tracer_options = .{
                 .writer = if (trace_writer) |writer| writer.any() else null,
-                .io = &command.io,
+                .statsd_options = .{
+                    .io = &command.io,
+                    .address = try std.net.Address.resolveIp("127.0.0.1", 8125),
+                },
             },
             .replicate_options = .{
                 .closed_loop = args.replicate_closed_loop,

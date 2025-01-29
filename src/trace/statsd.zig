@@ -10,8 +10,20 @@ const EventMetricAggregate = @import("event.zig").EventMetricAggregate;
 const EventTiming = @import("event.zig").EventTiming;
 const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
 
+const log = std.log.scoped(.statsd);
+
+/// It's assumed you'll be running a statsd server on the same machine, in which case MTU is not
+/// important, or, you'll be running it over a local network. Choose 1400 as a conservative
+/// estimate for the largest UDP packet we'll emit in that case.
 const max_packet_size = 1400;
-const max_packet_count = 256;
+
+/// This implementation emits on an open-loop: on the emit interval, it fires off up to
+/// max_packet_count UDP packets, without waiting for completions.
+///
+/// The emit interval needs to be large enough that the kernel will have finished processing them
+/// before emitting again. If not, a warning will be printed.
+// TODO: For now, this assumes 100 bytes max per event! This can actually be computed exactly....
+const max_packet_count = stdx.div_ceil(EventMetric.stack_count + EventTiming.stack_count, 14);
 
 const BufferCompletion = struct {
     buffer: [max_packet_size]u8,
@@ -27,6 +39,8 @@ pub const StatsD = struct {
     buffer_completions: BufferCompletionRing,
     buffer_completions_buffer: []BufferCompletion,
 
+    events_metric_emitted: []?EventMetricAggregate,
+
     /// Creates a statsd instance, which will send UDP packets via the IO instance provided.
     pub fn init(allocator: std.mem.Allocator, io: *IO, address: std.net.Address) !StatsD {
         const socket = try io.open_socket(
@@ -36,31 +50,47 @@ pub const StatsD = struct {
         );
         errdefer io.close_socket(socket);
 
-        var buffer_completions = BufferCompletionRing.init();
         const buffer_completions_buffer = try allocator.alloc(BufferCompletion, max_packet_count);
+        errdefer allocator.free(buffer_completions_buffer);
+
+        var buffer_completions = BufferCompletionRing.init();
         for (buffer_completions_buffer) |*buffer_completion| {
             buffer_completions.push_assume_capacity(buffer_completion);
         }
 
+        const events_metric_emitted = try allocator.alloc(?EventMetricAggregate, EventMetric.stack_count);
+        errdefer allocator.free(events_metric_emitted);
+
+        @memset(events_metric_emitted, null);
+
         // 'Connect' the UDP socket, so we can just send() to it normally.
         try std.posix.connect(socket, &address.any, address.getOsSockLen());
+
+        log.info("sending statsd metrics to {}", .{address});
 
         return .{
             .socket = socket,
             .io = io,
             .buffer_completions = buffer_completions,
             .buffer_completions_buffer = buffer_completions_buffer,
+            .events_metric_emitted = events_metric_emitted,
         };
     }
 
     // FIXME: io cancellation?
     pub fn deinit(self: *StatsD, allocator: std.mem.Allocator) void {
         self.io.close_socket(self.socket);
+        allocator.free(self.events_metric_emitted);
         allocator.free(self.buffer_completions_buffer);
-        self.buffer_completions.deinit(allocator);
     }
 
     pub fn emit(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
+        if (self.buffer_completions.count != max_packet_count) {
+            log.warn("{} packets still in flight", .{
+                max_packet_count - self.buffer_completions.count,
+            });
+        }
+
         // At some point, would it be more efficient to use a hashmap here...?
         var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
         var buffer_written: usize = 0;
@@ -69,12 +99,15 @@ pub const StatsD = struct {
         // It's less error prone to write into a standalone buffer and copy it into the packet, then
         // to deal with having partially written into a packet and needing to erase that and rewind
         // the iterator to try again.
-        var buffer_single: [max_packet_size]u8 = undefined;
-        std.debug.assert(buffer_single.len <= self.buffer_completions_buffer[0].buffer.len);
+        // var buffer_single: [max_packet_size]u8 = undefined;
+        // std.debug.assert(buffer_single.len <= self.buffer_completions_buffer[0].buffer.len);
 
         var iterator = Iterator{
-            .metrics = .{ .buffer = &buffer_single, .events_metric = events_metric },
-            .timings = .{ .buffer = &buffer_single, .events_timing = events_timing },
+            .metrics = .{
+                .events_metric = events_metric,
+                .events_metric_emitted = self.events_metric_emitted,
+            },
+            .timings = .{ .events_timing = events_timing },
         };
 
         while (iterator.next()) |line| {
@@ -116,6 +149,8 @@ pub const StatsD = struct {
         } else {
             self.buffer_completions.push_assume_capacity(buffer_completion);
         }
+
+        @memcpy(self.events_metric_emitted, events_metric);
     }
 
     /// The UDP packets containing the metrics are sent in a fire-and-forget manner. Generally,
@@ -126,28 +161,39 @@ pub const StatsD = struct {
         result: IO.SendError!usize,
     ) void {
         _ = result catch |e| {
-            std.log.warn("error sending metric: {}", .{e});
+            log.warn("error sending metric: {}", .{e});
         };
         const buffer_completion: *BufferCompletion = @fieldParentPtr("completion", completion);
         self.buffer_completions.push_assume_capacity(buffer_completion);
     }
 };
 
+// FIXME: for metrics, keep track of emission and re-emit same values on a timer
 const Iterator = struct {
     const Output = ?union(enum) { none, some: []const u8 };
 
     metrics: struct {
         const TagFormatter = EventStatsdTagFormatter(EventMetric);
 
-        buffer: []u8,
         events_metric: []?EventMetricAggregate,
+        events_metric_emitted: []?EventMetricAggregate,
 
+        buffer: [max_packet_size]u8 = undefined,
         index: usize = 0,
 
         pub fn next(self: *@This()) Output {
             defer self.index += 1;
             if (self.index == self.events_metric.len) return null;
             const event_metric = self.events_metric[self.index] orelse return .none;
+
+            // Skip metrics that have the same value as when they were last emitted.
+            // FIXME: Add an override counter that will still send them, every minute or so.
+            const event_metric_previous = self.events_metric_emitted[self.index];
+            if (event_metric_previous != null and
+                event_metric.value == event_metric_previous.?.value)
+            {
+                return .none;
+            }
 
             const value = event_metric.value;
             const field_name = switch (event_metric.event) {
@@ -158,12 +204,13 @@ const Iterator = struct {
             };
 
             return .{
-                .some = std.fmt.bufPrint(
-                    self.buffer,
-                    // FIXME: Support counters too
-                    "tigerbeetle.{s}:{}|g|#{s}\n",
-                    .{ field_name, value, event_metric_tag_formatter },
-                ) catch return .none, // FIXME: log err or ensure can never happen exhaustively
+                .some = stdx.array_print(
+                    max_packet_size,
+                    &self.buffer,
+                    // TODO: Support counters.
+                    "tigerbeetle.{[name]s}:{[value]}|g|#{[tags]s}\n",
+                    .{ .name = field_name, .value = value, .tags = event_metric_tag_formatter },
+                ),
             };
         }
     },
@@ -172,9 +219,9 @@ const Iterator = struct {
         const Aggregation = enum { min, avg, max, sum, count, sentinel };
         const TagFormatter = EventStatsdTagFormatter(EventTiming);
 
-        buffer: []u8,
         events_timing: []?EventTimingAggregate,
 
+        buffer: [max_packet_size]u8 = undefined,
         index: usize = 0,
         index_aggregation: Aggregation = .min,
 
@@ -198,7 +245,10 @@ const Iterator = struct {
                 .event = event_timing.event,
             };
 
-            // FIXME: Report as seconds and follow best practices from prom wiki.
+            // FIXME: Follow best practices from prom wiki.
+            // It's common to emit metrics in seconds, rather than us or ms. Internally things are
+            // kept as us, and conversion to floating point is done here as late as possible.
+            // It is possible to do this without floating point, but ...
             const value = switch (self.index_aggregation) {
                 .min => @as(f64, @floatFromInt(values.duration_min_us)) / std.time.us_per_s,
                 // Might make more sense to do the div in floating point?
@@ -210,15 +260,24 @@ const Iterator = struct {
                 .sentinel => unreachable,
             };
 
-            // Emit count and sum as counter metrics, and the rest as gagues. This ensure that ... FIXME
+            // Emit count and sum as counter metrics, and the rest as gagues. This ensures that the
+            // upstream statsd server will aggregate count and sum by summing them together, while
+            // using last-value-wins for min/avg/max, which is not strictly accurate but the best
+            // that can be done. (FIXME: OR IS IT?)
             const statsd_type = if (self.index_aggregation == .count or self.index_aggregation == .sum) "c" else "g";
             return .{
-                .some = std.fmt.bufPrint(
-                    self.buffer,
-                    // FIXME: Make format string more readable.
-                    "tigerbeetle.{s}_seconds.{s}:{d}|{s}|#{s}\n",
-                    .{ field_name, @tagName(self.index_aggregation), value, statsd_type, tag_formatter },
-                ) catch return .none, // FIXME: log err or ensure can never happen exhaustively
+                .some = stdx.array_print(
+                    max_packet_size,
+                    &self.buffer,
+                    "tigerbeetle.{[name]s}_seconds.{[aggregation]s}:{[value]d}|{[statsd_type]s}|#{[tags]s}\n",
+                    .{
+                        .name = field_name,
+                        .aggregation = @tagName(self.index_aggregation),
+                        .value = value,
+                        .statsd_type = statsd_type,
+                        .tags = tag_formatter,
+                    },
+                ),
             };
         }
     },
@@ -239,7 +298,7 @@ const Iterator = struct {
     }
 };
 
-/// Format EventTiming and EventMetric's payload (ie, the tags) in a dogstatsd compatible way:
+/// Format EventMetric and EventTiming's payload (ie, the tags) in a dogstatsd compatible way:
 /// Tags are comma separated, with a `:` between key:value pairs.
 fn EventStatsdTagFormatter(EventType: type) type {
     return struct {
