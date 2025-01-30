@@ -99,14 +99,10 @@ const std = @import("std");
 const assert = std.debug.assert;
 const log = std.log.scoped(.trace);
 
-const constants = @import("constants.zig");
-const IO = @import("io.zig").IO;
-
 const Metrics = @import("trace/metric.zig").Metrics;
 const Event = @import("trace/event.zig").Event;
 const EventTracing = @import("trace/event.zig").EventTracing;
 const EventTiming = @import("trace/event.zig").EventTiming;
-const EventAggregate = @import("trace/event.zig").EventAggregate;
 
 const trace_span_size_max = 1024;
 
@@ -249,7 +245,7 @@ pub const Tracer = struct {
             }
         }
 
-        // FIXME: Reset metrics too.
+        tracer.metrics.reset_all();
     }
 
     fn write_stop(tracer: *Tracer, stack: u32) void {

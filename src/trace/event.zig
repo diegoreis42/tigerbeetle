@@ -201,7 +201,12 @@ pub const EventTiming = union(Event.EventTag) {
                 return stack_bases.get(event.*) + @as(u32, @intCast(stage));
             },
             // Single payload: TreeEnum
-            inline .compact_mutable, .compact_mutable_suffix, .lookup, .lookup_worker, .scan_tree => |data| {
+            inline .compact_mutable,
+            .compact_mutable_suffix,
+            .lookup,
+            .lookup_worker,
+            .scan_tree,
+            => |data| {
                 const tree_id = @intFromEnum(data.tree);
                 assert(tree_id < stack_limits.get(event.*));
 
@@ -367,7 +372,6 @@ pub const EventTracing = union(Event.EventTag) {
     }
 };
 
-/// Metric
 pub const EventMetric = union(enum) {
     const EventTag = std.meta.Tag(EventMetric);
 
@@ -419,7 +423,7 @@ pub const EventMetric = union(enum) {
 };
 
 /// Format EventTiming and EventMetric's payload (ie, the tags) with a space separated k=v format.
-fn EventEqualsFormatter(comptime Data: type) type {
+fn EventEqualsFormatterType(comptime Data: type) type {
     assert(@typeInfo(Data) == .Struct or @typeInfo(Data) == .Void);
 
     if (@typeInfo(Data) == .Void) {
@@ -475,8 +479,8 @@ fn EventEqualsFormatter(comptime Data: type) type {
 
 pub fn event_equals_format(
     data: anytype,
-) EventEqualsFormatter(@TypeOf(data)) {
-    return EventEqualsFormatter(@TypeOf(data)){ .data = data };
+) EventEqualsFormatterType(@TypeOf(data)) {
+    return EventEqualsFormatterType(@TypeOf(data)){ .data = data };
 }
 
 pub const EventTimingAggregate = struct {
@@ -494,5 +498,3 @@ pub const EventMetricAggregate = struct {
     event: EventMetric,
     value: u64,
 };
-
-// test "event"

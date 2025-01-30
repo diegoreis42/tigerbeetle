@@ -8,7 +8,8 @@ const assert = std.debug.assert;
 /// wrapping --- we need an `fn count` which returns an `usize`, instead of potentially much smaller
 /// type which stores the length internally.
 pub fn BoundedArrayType(comptime T: type, comptime buffer_capacity: usize) type {
-    const Inner = @import("std").BoundedArray(T, buffer_capacity); // smuggle the std version past tidy
+    // Smuggle the std version past tidy.
+    const Inner = @import("std").BoundedArray(T, buffer_capacity);
 
     return struct {
         inner: Inner = Inner{},

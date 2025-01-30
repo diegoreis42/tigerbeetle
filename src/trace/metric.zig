@@ -1,10 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const stdx = @import("../stdx.zig");
 const IO = @import("../io.zig").IO;
 const StatsD = @import("statsd.zig").StatsD;
-const Event = @import("event.zig").Event;
+
 const EventTiming = @import("event.zig").EventTiming;
 const EventMetric = @import("event.zig").EventMetric;
 const EventTimingAggregate = @import("event.zig").EventTimingAggregate;
@@ -49,6 +48,8 @@ pub const Metrics = struct {
         self.statsd.deinit(allocator);
         allocator.free(self.events_timing);
         allocator.free(self.events_metric);
+
+        self.* = undefined;
     }
 
     /// Gauges work on a last-set wins. Multiple calls to .gauge() followed by an emit will result
@@ -97,7 +98,6 @@ pub const Metrics = struct {
         }
     }
 
-    // TODO: Handle rarely changing metrics with statsd.
     pub fn emit(self: *Metrics) void {
         self.statsd.emit(self.events_metric, self.events_timing);
 
