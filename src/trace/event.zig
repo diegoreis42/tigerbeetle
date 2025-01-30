@@ -5,8 +5,6 @@ const constants = @import("../constants.zig");
 
 const CommitStage = @import("../vsr/replica.zig").CommitStage;
 
-// FIXME: Exhaustive tests for Event
-
 // FIXME: Doesn't this exist somewhere already?
 // FIXME: Naming doesn't align with what we use, eg accounts.id vs Account.id
 const TreeEnum = tree_enum: {

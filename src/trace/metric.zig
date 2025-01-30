@@ -19,7 +19,7 @@ pub const Metrics = struct {
     events_metric: []?EventMetricAggregate,
     events_timing: []?EventTimingAggregate,
 
-    statsd: ?StatsD,
+    statsd: StatsD,
 
     pub fn init(allocator: std.mem.Allocator, options: struct { statsd: StatsDOptions }) !Metrics {
         const events_metric = try allocator.alloc(?EventMetricAggregate, EventMetric.stack_count);
@@ -35,8 +35,8 @@ pub const Metrics = struct {
         const statsd = if (options.statsd) |statsd_options|
             try StatsD.init(allocator, statsd_options.io, statsd_options.address)
         else
-            null;
-        errdefer if (statsd) |*s| s.deinit(allocator);
+            try StatsD.init_log(allocator);
+        errdefer statsd.deinit(allocator);
 
         return .{
             .events_metric = events_metric,
@@ -46,7 +46,7 @@ pub const Metrics = struct {
     }
 
     pub fn deinit(self: *Metrics, allocator: std.mem.Allocator) void {
-        if (self.statsd) |*s| s.deinit(allocator);
+        self.statsd.deinit(allocator);
         allocator.free(self.events_timing);
         allocator.free(self.events_metric);
     }
@@ -98,10 +98,8 @@ pub const Metrics = struct {
     }
 
     // TODO: Handle rarely changing metrics with statsd.
-    pub fn emit(self: *Metrics) !void {
-        if (self.statsd) |*s| {
-            try s.emit(self.events_metric, self.events_timing);
-        }
+    pub fn emit(self: *Metrics) void {
+        self.statsd.emit(self.events_metric, self.events_timing);
 
         // For statsd, the right thing is to reset metrics between emitting. For something like
         // Prometheus, this would have to be removed.

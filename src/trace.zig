@@ -282,9 +282,7 @@ pub const Tracer = struct {
 
     pub fn emit(tracer: *Tracer) void {
         tracer.start(.metrics_emit);
-        tracer.metrics.emit() catch |e| {
-            log.warn("error while emitting metrics: {}", .{e});
-        };
+        tracer.metrics.emit();
         tracer.stop(.metrics_emit);
     }
 };

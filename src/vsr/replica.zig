@@ -3980,7 +3980,7 @@ pub fn ReplicaType(
                     self.trace.stop(.{ .replica_commit = .{ .stage = self.commit_stage } });
                     self.commit_stage = .checkpoint_durable;
                     self.trace.start(.{ .replica_commit = .{
-                        .stage = @tagName(self.commit_stage),
+                        .stage = self.commit_stage,
                         .op = self.commit_prepare.?.header.op,
                     } });
 
@@ -3991,7 +3991,7 @@ pub fn ReplicaType(
                     self.trace.stop(.{ .replica_commit = .{ .stage = self.commit_stage } });
                     self.commit_stage = .compact;
                     self.trace.start(.{ .replica_commit = .{
-                        .stage = @tagName(self.commit_stage),
+                        .stage = self.commit_stage,
                         .op = self.commit_prepare.?.header.op,
                     } });
                     if (self.commit_compact() == .pending) return;

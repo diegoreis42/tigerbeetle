@@ -1,9 +1,11 @@
 const std = @import("std");
 const stdx = @import("../stdx.zig");
 
+const assert = std.debug.assert;
+
 const IO = @import("../io.zig").IO;
 const FIFOType = @import("../fifo.zig").FIFOType;
-const RingBufferType = @import("../ring_buffer.zig").RingBufferType;
+const RingBufferType = stdx.RingBufferType;
 
 const EventMetric = @import("event.zig").EventMetric;
 const EventMetricAggregate = @import("event.zig").EventMetricAggregate;
@@ -16,37 +18,37 @@ const log = std.log.scoped(.statsd);
 /// network.
 ///
 /// https://github.com/statsd/statsd/blob/master/docs/metric_types.md#multi-metric-packets
-/// FIXME: Assert no metric is larger than this.
-const max_packet_size = 1400;
+const packet_size_max = 1400;
+
+/// No single metric may be larger than this value. If it is, it'll be dropped with an error
+/// message.
+///
+/// TODO: This is a static upper bound, it could be calculated at comptime!
+const statsd_line_size_max = 350;
+const messages_per_packet = @divFloor(packet_size_max, statsd_line_size_max);
 
 /// This implementation emits on an open-loop: on the emit interval, it fires off up to
 /// max_packet_count UDP packets, without waiting for completions.
 ///
 /// The emit interval needs to be large enough that the kernel will have finished processing them
-/// before emitting again. If not, a warning will be printed.
-// TODO: For now, this assumes 100 bytes max per event! This can actually be computed exactly....
-/// The maximum number of packets that can be sent in one flush. The implementation does not do
-/// backpressure, so if all packets haven't finished sending between flush cycles (incredibly
-/// unlikely, if not impossible due to how sending UDP packets works in the kernel), then packets
-/// will be dropped.
-///
-/// However, this value needs to be high enough to account for the maximum number of metrics that
-/// will be sent _within_ a single flush, given how many metrics can fit into a single packet
-///
-/// TODO: This is an extreme upper bound, it can be reduced! It assumes a single packet can only
-/// take one metric / timing.
-const max_packet_count = EventMetric.stack_count + EventTiming.stack_count;
+/// before emitting again. If not, an error will be logged.
+const max_packet_count = stdx.div_ceil(EventMetric.stack_count + EventTiming.stack_count, messages_per_packet);
 
 const BufferCompletion = struct {
-    buffer: [max_packet_size]u8,
+    buffer: [packet_size_max]u8,
     completion: IO.Completion = undefined,
 };
 
 const BufferCompletionRing = RingBufferType(*BufferCompletion, .{ .array = max_packet_count });
 
 pub const StatsD = struct {
-    socket: std.posix.socket_t,
-    io: *IO,
+    implementation: union(enum) {
+        udp: struct {
+            socket: std.posix.socket_t,
+            io: *IO,
+        },
+        log,
+    },
 
     buffer_completions: BufferCompletionRing,
     buffer_completions_buffer: []BufferCompletion,
@@ -81,38 +83,59 @@ pub const StatsD = struct {
         log.info("sending statsd metrics to {}", .{address});
 
         return .{
-            .socket = socket,
-            .io = io,
+            .implementation = .{
+                .udp = .{
+                    .socket = socket,
+                    .io = io,
+                },
+            },
             .buffer_completions = buffer_completions,
             .buffer_completions_buffer = buffer_completions_buffer,
             .events_metric_emitted = events_metric_emitted,
         };
     }
 
-    // FIXME: io cancellation?
+    // Creates a statsd instance, which will log out the packets that would have been sent. Useful
+    // so that all of the other code can run and be tested in the simulator.
+    pub fn init_log(allocator: std.mem.Allocator) !StatsD {
+        const buffer_completions_buffer = try allocator.alloc(BufferCompletion, max_packet_count);
+        errdefer allocator.free(buffer_completions_buffer);
+
+        var buffer_completions = BufferCompletionRing.init();
+        for (buffer_completions_buffer) |*buffer_completion| {
+            buffer_completions.push_assume_capacity(buffer_completion);
+        }
+
+        const events_metric_emitted = try allocator.alloc(?EventMetricAggregate, EventMetric.stack_count);
+        errdefer allocator.free(events_metric_emitted);
+
+        @memset(events_metric_emitted, null);
+
+        return .{
+            .implementation = .log,
+            .buffer_completions = buffer_completions,
+            .buffer_completions_buffer = buffer_completions_buffer,
+            .events_metric_emitted = events_metric_emitted,
+        };
+    }
+
     pub fn deinit(self: *StatsD, allocator: std.mem.Allocator) void {
-        self.io.close_socket(self.socket);
+        if (self.implementation == .udp) self.implementation.udp.io.close_socket(self.implementation.udp.socket);
         allocator.free(self.events_metric_emitted);
         allocator.free(self.buffer_completions_buffer);
     }
 
-    pub fn emit(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) !void {
+    pub fn emit(self: *StatsD, events_metric: []?EventMetricAggregate, events_timing: []?EventTimingAggregate) void {
+        // This should really not happen; it means we're emitting so many packets, on a short enough emit timeout, that
+        // the kernel hasn't been able to process them all (UDP doesn't block or provide backpressure like a standard TCP socket).
+        //
+        // Keep it as a log, rather than assert, to avoid the common pitfall of metrics killing the whole system.
         if (self.buffer_completions.count != max_packet_count) {
-            log.warn("{} packets still in flight", .{
+            log.err("{} / {} packets still in flight; trying to continue", .{
                 max_packet_count - self.buffer_completions.count,
+                max_packet_count,
             });
         }
-
-        // At some point, would it be more efficient to use a hashmap here...?
-        var buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
-        var buffer_written: usize = 0;
-
-        // FIXME: Comptime lenght limits, must be under a packet...
-        // It's less error prone to write into a standalone buffer and copy it into the packet, then
-        // to deal with having partially written into a packet and needing to erase that and rewind
-        // the iterator to try again.
-        // var buffer_single: [max_packet_size]u8 = undefined;
-        // std.debug.assert(buffer_single.len <= self.buffer_completions_buffer[0].buffer.len);
 
         var iterator = Iterator{
             .metrics = .{
@@ -122,42 +145,67 @@ pub const StatsD = struct {
             .timings = .{ .events_timing = events_timing },
         };
 
+        var buffer_completion = self.buffer_completions.pop() orelse {
+            log.err("insufficient packets to emit any metrics", .{});
+            return;
+        };
+        var buffer_completion_written: usize = 0;
+
         while (iterator.next()) |line| {
             if (line == .none) continue;
 
             const statsd_line = line.some;
 
             // Might need a new buffer, if this one is full.
-            if (statsd_line.len > buffer_completion.buffer[buffer_written..].len) {
-                self.io.send(
-                    *StatsD,
-                    self,
-                    StatsD.send_callback,
-                    &buffer_completion.completion,
-                    self.socket,
-                    buffer_completion.buffer[0..buffer_written],
-                );
+            if (statsd_line.len > buffer_completion.buffer[buffer_completion_written..].len) {
+                switch (self.implementation) {
+                    .udp => |udp| {
+                        udp.io.send(
+                            *StatsD,
+                            self,
+                            StatsD.send_callback,
+                            &buffer_completion.completion,
+                            udp.socket,
+                            buffer_completion.buffer[0..buffer_completion_written],
+                        );
+                    },
+                    .log => {
+                        log.debug("statsd packet: {s}", .{buffer_completion.buffer[0..buffer_completion_written]});
+                        StatsD.send_callback(self, &buffer_completion.completion, buffer_completion_written);
+                    },
+                }
 
-                buffer_completion = self.buffer_completions.pop() orelse return error.NoSpaceLeft;
+                buffer_completion = self.buffer_completions.pop() orelse {
+                    log.err("insufficient packets to emit all metrics", .{});
+                    return;
+                };
 
-                buffer_written = 0;
-                std.debug.assert(buffer_completion.buffer[buffer_written..].len > statsd_line.len);
+                buffer_completion_written = 0;
+                assert(buffer_completion.buffer[buffer_completion_written..].len > statsd_line.len);
             }
 
-            stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[buffer_written..], statsd_line);
-            buffer_written += statsd_line.len;
+            stdx.copy_disjoint(.inexact, u8, buffer_completion.buffer[buffer_completion_written..], statsd_line);
+            buffer_completion_written += statsd_line.len;
         }
 
         // Send the final packet, if needed, or return the BufferCompletion to the queue.
-        if (buffer_written > 0) {
-            self.io.send(
-                *StatsD,
-                self,
-                StatsD.send_callback,
-                &buffer_completion.completion,
-                self.socket,
-                buffer_completion.buffer[0..buffer_written],
-            );
+        if (buffer_completion_written > 0) {
+            switch (self.implementation) {
+                .udp => |udp| {
+                    udp.io.send(
+                        *StatsD,
+                        self,
+                        StatsD.send_callback,
+                        &buffer_completion.completion,
+                        udp.socket,
+                        buffer_completion.buffer[0..buffer_completion_written],
+                    );
+                },
+                .log => {
+                    log.debug("statsd packet: {s}", .{buffer_completion.buffer[0..buffer_completion_written]});
+                    StatsD.send_callback(self, &buffer_completion.completion, buffer_completion_written);
+                },
+            }
         } else {
             self.buffer_completions.push_assume_capacity(buffer_completion);
         }
@@ -165,13 +213,13 @@ pub const StatsD = struct {
         @memcpy(self.events_metric_emitted, events_metric);
     }
 
-    /// The UDP packets containing the metrics are sent in a fire-and-forget manner. Generally,
-    /// FIXME: explain why this is ok and reduces complexity
+    /// The UDP packets containing the metrics are sent in a fire-and-forget manner.
     fn send_callback(
         self: *StatsD,
         completion: *IO.Completion,
         result: IO.SendError!usize,
     ) void {
+        // TODO: This could be quite verbose: do we want to throttle it?
         _ = result catch |e| {
             log.warn("error sending metric: {}", .{e});
         };
@@ -180,26 +228,25 @@ pub const StatsD = struct {
     }
 };
 
-// FIXME: for metrics, keep track of emission and re-emit same values on a timer
 const Iterator = struct {
     const Output = ?union(enum) { none, some: []const u8 };
-
-    metrics: struct {
+    const MetricsIterator = struct {
         const TagFormatter = EventStatsdTagFormatter(EventMetric);
 
         events_metric: []?EventMetricAggregate,
         events_metric_emitted: []?EventMetricAggregate,
 
-        buffer: [max_packet_size]u8 = undefined,
+        buffer: [statsd_line_size_max]u8 = undefined,
         index: usize = 0,
 
-        pub fn next(self: *@This()) Output {
+        pub fn next(self: *MetricsIterator) Output {
+            assert(self.events_metric.len == self.events_metric_emitted.len);
+
             defer self.index += 1;
             if (self.index == self.events_metric.len) return null;
             const event_metric = self.events_metric[self.index] orelse return .none;
 
             // Skip metrics that have the same value as when they were last emitted.
-            // FIXME: Add an override counter that will still send them, every minute or so.
             const event_metric_previous = self.events_metric_emitted[self.index];
             if (event_metric_previous != null and
                 event_metric.value == event_metric_previous.?.value)
@@ -216,37 +263,41 @@ const Iterator = struct {
             };
 
             return .{
-                .some = stdx.array_print(
-                    max_packet_size,
+                .some = std.fmt.bufPrint(
                     &self.buffer,
                     // TODO: Support counters.
                     "tigerbeetle.{[name]s}:{[value]}|g|#{[tags]s}\n",
                     .{ .name = field_name, .value = value, .tags = event_metric_tag_formatter },
-                ),
+                ) catch {
+                    log.err("metric line for {s} exceeeds buffer size", .{field_name});
+                    return .none;
+                },
             };
         }
-    },
+    };
 
-    timings: struct {
+    const TimingsIterator = struct {
         const Aggregation = enum { min, avg, max, sum, count, sentinel };
         const TagFormatter = EventStatsdTagFormatter(EventTiming);
 
         events_timing: []?EventTimingAggregate,
 
-        buffer: [max_packet_size]u8 = undefined,
+        buffer: [statsd_line_size_max]u8 = undefined,
         index: usize = 0,
         index_aggregation: Aggregation = .min,
 
-        pub fn next(self: *@This()) Output {
+        pub fn next(self: *TimingsIterator) Output {
             defer {
-                // FIXME: Better way?
                 self.index_aggregation = @enumFromInt(@intFromEnum(self.index_aggregation) + 1);
+
                 if (self.index_aggregation == .sentinel) {
                     self.index += 1;
                     self.index_aggregation = .min;
                 }
             }
+
             if (self.index == self.events_timing.len) return null;
+
             const event_timing = self.events_timing[self.index] orelse return .none;
 
             const values = event_timing.values;
@@ -257,13 +308,12 @@ const Iterator = struct {
                 .event = event_timing.event,
             };
 
-            // FIXME: Follow best practices from prom wiki.
             // It's common to emit metrics in seconds, rather than us or ms. Internally things are
             // kept as us, and conversion to floating point is done here as late as possible.
-            // It is possible to do this without floating point, but ...
+            // (It is possible to do this without floating point, but not worth it!)
             const value = switch (self.index_aggregation) {
                 .min => @as(f64, @floatFromInt(values.duration_min_us)) / std.time.us_per_s,
-                // Might make more sense to do the div in floating point?
+                // TODO: Might make more sense to do the div in floating point?
                 .avg => @as(f64, @floatFromInt(@divFloor(values.duration_sum_us, values.count))) /
                     std.time.us_per_s,
                 .max => @as(f64, @floatFromInt(values.duration_max_us)) / std.time.us_per_s,
@@ -275,11 +325,11 @@ const Iterator = struct {
             // Emit count and sum as counter metrics, and the rest as gagues. This ensures that the
             // upstream statsd server will aggregate count and sum by summing them together, while
             // using last-value-wins for min/avg/max, which is not strictly accurate but the best
-            // that can be done. (FIXME: OR IS IT?)
+            // that can be done.
+            // TODO: Or is it?
             const statsd_type = if (self.index_aggregation == .count or self.index_aggregation == .sum) "c" else "g";
             return .{
-                .some = stdx.array_print(
-                    max_packet_size,
+                .some = std.fmt.bufPrint(
                     &self.buffer,
                     "tigerbeetle.{[name]s}_seconds.{[aggregation]s}:{[value]d}|{[statsd_type]s}|#{[tags]s}\n",
                     .{
@@ -289,10 +339,16 @@ const Iterator = struct {
                         .statsd_type = statsd_type,
                         .tags = tag_formatter,
                     },
-                ),
+                ) catch {
+                    log.err("metric line for {s} exceeeds buffer size", .{field_name});
+                    return .none;
+                },
             };
         }
-    },
+    };
+
+    metrics: MetricsIterator,
+    timings: TimingsIterator,
 
     metrics_exhausted: bool = false,
     timings_exhausted: bool = false,
@@ -333,7 +389,7 @@ fn EventStatsdTagFormatter(EventType: type) type {
 
                     const fields = std.meta.fields(@TypeOf(data));
                     inline for (fields, 0..) |data_field, i| {
-                        std.debug.assert(data_field.type == bool or
+                        assert(data_field.type == bool or
                             @typeInfo(data_field.type) == .Int or
                             @typeInfo(data_field.type) == .Enum or
                             @typeInfo(data_field.type) == .Union);
