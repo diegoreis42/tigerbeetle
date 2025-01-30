@@ -151,15 +151,15 @@ pub const EventTiming = union(Event.EventTag) {
         .replica_commit = enum_max(CommitStage),
         .replica_aof_write = 1,
         .replica_sync_table = 1,
-        .compact_beat = enum_max(TreeEnum) * constants.lsm_levels,
-        .compact_beat_merge = enum_max(TreeEnum) * constants.lsm_levels,
+        .compact_beat = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .compact_beat_merge = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
         .compact_manifest = 1,
         .compact_mutable = enum_max(TreeEnum),
         .compact_mutable_suffix = enum_max(TreeEnum),
         .lookup = enum_max(TreeEnum),
         .lookup_worker = enum_max(TreeEnum),
         .scan_tree = enum_max(TreeEnum),
-        .scan_tree_level = enum_max(TreeEnum) * constants.lsm_levels,
+        .scan_tree_level = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
         .grid_read = 1,
         .grid_write = 1,
         .metrics_emit = 1,
@@ -216,7 +216,7 @@ pub const EventTiming = union(Event.EventTag) {
             inline .compact_beat, .compact_beat_merge => |data| {
                 const tree_id = @intFromEnum(data.tree);
                 const level_b = data.level_b;
-                const offset = tree_id * constants.lsm_levels + level_b;
+                const offset = tree_id * @as(u32, constants.lsm_levels) + level_b;
                 assert(offset < stack_limits.get(event.*));
 
                 return stack_bases.get(event.*) + @as(u32, @intCast(offset));
@@ -225,7 +225,7 @@ pub const EventTiming = union(Event.EventTag) {
             inline .scan_tree_level => |data| {
                 const tree_id = @intFromEnum(data.tree);
                 const level = data.level;
-                const offset = tree_id * constants.lsm_levels + level;
+                const offset = tree_id * @as(u32, constants.lsm_levels) + level;
                 assert(offset < stack_limits.get(event.*));
 
                 return stack_bases.get(event.*) + @as(u32, @intCast(offset));
@@ -290,7 +290,7 @@ pub const EventTracing = union(Event.EventTag) {
         .lookup = 1,
         .lookup_worker = constants.grid_iops_read_max,
         .scan_tree = constants.lsm_scans_max,
-        .scan_tree_level = constants.lsm_scans_max * constants.lsm_levels,
+        .scan_tree_level = constants.lsm_scans_max * @as(u32, constants.lsm_levels),
         .grid_read = constants.grid_iops_read_max,
         .grid_write = constants.grid_iops_write_max,
         .metrics_emit = 1,
@@ -379,8 +379,8 @@ pub const EventMetric = union(enum) {
     table_count_visible_max: struct { tree: TreeEnum, level: u8 },
 
     pub const stack_limits = std.enums.EnumArray(EventTag, u32).init(.{
-        .table_count_visible = enum_max(TreeEnum) * constants.lsm_levels,
-        .table_count_visible_max = enum_max(TreeEnum) * constants.lsm_levels,
+        .table_count_visible = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
+        .table_count_visible_max = enum_max(TreeEnum) * @as(u32, constants.lsm_levels),
     });
 
     pub const stack_bases = array: {
@@ -407,7 +407,7 @@ pub const EventMetric = union(enum) {
             inline .table_count_visible, .table_count_visible_max => |data| {
                 const tree_id = @intFromEnum(data.tree);
                 const level = data.level;
-                const offset = tree_id * constants.lsm_levels + level;
+                const offset = tree_id * @as(u32, constants.lsm_levels) + level;
                 assert(offset < stack_limits.get(event.*));
 
                 return stack_bases.get(event.*) + @as(u32, @intCast(offset));
