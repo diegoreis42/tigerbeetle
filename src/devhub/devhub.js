@@ -134,7 +134,7 @@ async function mainSeeds() {
       : "";
     rowDom.innerHTML = `
           <td>
-            <a href="https://github.com/tigerbeetle/tigerbeetle/commit/${record.commit_sha}">
+            <a href="https://github.com/tigerbeetle/tigerbeetle/commit/${record.commit_sha}" class="seed-commit">
               ${record.commit_sha.substring(0, 7)}
             </a>
             ${prLink}

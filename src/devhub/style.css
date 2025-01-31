@@ -194,3 +194,7 @@ section#metrics {
         }
     }
 }
+
+a.seed-commit {
+    font-family: monospace;
+}
